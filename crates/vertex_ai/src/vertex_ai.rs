@@ -642,6 +642,35 @@ pub async fn stream_generate_content(
     }
 }
 
+/// Remove thinking and redacted_thinking content blocks from assistant messages
+/// in the serialized request body. Vertex AI rejects thinking signatures from
+/// previous conversation turns, so we strip them before sending.
+fn strip_thinking_blocks(body: &mut serde_json::Value) {
+    let messages = match body.get_mut("messages").and_then(|m| m.as_array_mut()) {
+        Some(messages) => messages,
+        None => return,
+    };
+
+    for message in messages {
+        let is_assistant = message
+            .get("role")
+            .and_then(|r| r.as_str())
+            .map(|r| r == "assistant")
+            .unwrap_or(false);
+
+        if !is_assistant {
+            continue;
+        }
+
+        if let Some(content) = message.get_mut("content").and_then(|c| c.as_array_mut()) {
+            content.retain(|block| {
+                let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                block_type != "thinking" && block_type != "redacted_thinking"
+            });
+        }
+    }
+}
+
 /// Stream a completion for an Anthropic publisher model (Claude) on Vertex AI.
 pub async fn stream_raw_predict(
     client: &dyn HttpClient,
@@ -677,6 +706,10 @@ pub async fn stream_raw_predict(
             serde_json::Value::String("vertex-2023-10-16".to_string()),
         );
     }
+
+    // Strip thinking/redacted_thinking blocks from assistant messages.
+    // Vertex AI rejects signatures from previous turns as invalid.
+    strip_thinking_blocks(&mut body);
 
     let serialized = serde_json::to_string(&body)
         .map_err(anthropic::AnthropicError::SerializeRequest)?;
