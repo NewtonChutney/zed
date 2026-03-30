@@ -1,4 +1,6 @@
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, anyhow};
 use futures::{AsyncBufReadExt, AsyncReadExt, StreamExt, io::BufReader, stream::BoxStream};
@@ -6,7 +8,97 @@ use http_client::{AsyncBody, HttpClient, Method, Request as HttpRequest};
 use serde::{Deserialize, Serialize};
 use strum::EnumIter;
 
+/// Metadata for a well-known Vertex AI model used to populate capabilities
+/// when a model is discovered at runtime.
+struct KnownModelMetadata {
+    id: &'static str,
+    display_name: &'static str,
+    publisher: Publisher,
+    max_tokens: u64,
+    max_output_tokens: u64,
+    supports_thinking: bool,
+}
+
+const KNOWN_MODELS: &[KnownModelMetadata] = &[
+    KnownModelMetadata {
+        id: "gemini-2.5-pro",
+        display_name: "Gemini 2.5 Pro (Vertex)",
+        publisher: Publisher::Google,
+        max_tokens: 1_048_576,
+        max_output_tokens: 65_536,
+        supports_thinking: true,
+    },
+    KnownModelMetadata {
+        id: "gemini-2.5-flash",
+        display_name: "Gemini 2.5 Flash (Vertex)",
+        publisher: Publisher::Google,
+        max_tokens: 1_048_576,
+        max_output_tokens: 65_536,
+        supports_thinking: true,
+    },
+    KnownModelMetadata {
+        id: "claude-sonnet-4-6",
+        display_name: "Claude Sonnet 4.6 (Vertex)",
+        publisher: Publisher::Anthropic,
+        max_tokens: 1_000_000,
+        max_output_tokens: 64_000,
+        supports_thinking: true,
+    },
+    KnownModelMetadata {
+        id: "claude-sonnet-4-5",
+        display_name: "Claude Sonnet 4.5 (Vertex)",
+        publisher: Publisher::Anthropic,
+        max_tokens: 200_000,
+        max_output_tokens: 64_000,
+        supports_thinking: true,
+    },
+    KnownModelMetadata {
+        id: "claude-sonnet-4",
+        display_name: "Claude Sonnet 4 (Vertex)",
+        publisher: Publisher::Anthropic,
+        max_tokens: 200_000,
+        max_output_tokens: 64_000,
+        supports_thinking: true,
+    },
+    KnownModelMetadata {
+        id: "claude-opus-4-6",
+        display_name: "Claude Opus 4.6 (Vertex)",
+        publisher: Publisher::Anthropic,
+        max_tokens: 1_000_000,
+        max_output_tokens: 128_000,
+        supports_thinking: true,
+    },
+    KnownModelMetadata {
+        id: "claude-opus-4-5",
+        display_name: "Claude Opus 4.5 (Vertex)",
+        publisher: Publisher::Anthropic,
+        max_tokens: 200_000,
+        max_output_tokens: 32_000,
+        supports_thinking: true,
+    },
+    KnownModelMetadata {
+        id: "claude-haiku-4-5",
+        display_name: "Claude Haiku 4.5 (Vertex)",
+        publisher: Publisher::Anthropic,
+        max_tokens: 200_000,
+        max_output_tokens: 64_000,
+        supports_thinking: true,
+    },
+    KnownModelMetadata {
+        id: "claude-3-5-haiku",
+        display_name: "Claude 3.5 Haiku (Vertex)",
+        publisher: Publisher::Anthropic,
+        max_tokens: 200_000,
+        max_output_tokens: 8_192,
+        supports_thinking: false,
+    },
+];
+
 pub const DEFAULT_API_URL: &str = "https://us-east5-aiplatform.googleapis.com";
+
+fn default_true() -> bool {
+    true
+}
 const TOKEN_ENDPOINT: &str = "https://oauth2.googleapis.com/token";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -23,6 +115,20 @@ struct TokenResponse {
     access_token: String,
     expires_in: Option<u64>,
     token_type: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct AccessToken {
+    pub token: String,
+    pub expires_at: Option<Instant>,
+}
+
+impl AccessToken {
+    pub fn is_expired(&self) -> bool {
+        self.expires_at
+            .map(|expires_at| Instant::now() >= expires_at)
+            .unwrap_or(false)
+    }
 }
 
 pub fn gcloud_config_dir() -> Option<PathBuf> {
@@ -75,7 +181,7 @@ pub fn read_default_project() -> Result<String> {
 pub async fn refresh_access_token(
     client: &dyn HttpClient,
     credentials: &AdcCredentials,
-) -> Result<String> {
+) -> Result<AccessToken> {
     let body = serde_json::json!({
         "client_id": credentials.client_id,
         "client_secret": credentials.client_secret,
@@ -102,7 +208,208 @@ pub async fn refresh_access_token(
 
     let token_response: TokenResponse =
         serde_json::from_str(&text).context("Failed to parse token response")?;
-    Ok(token_response.access_token)
+
+    // Refresh 60 seconds before actual expiry to avoid races
+    let expires_at = token_response
+        .expires_in
+        .map(|secs| Instant::now() + Duration::from_secs(secs.saturating_sub(60)));
+
+    Ok(AccessToken {
+        token: token_response.access_token,
+        expires_at,
+    })
+}
+
+const ORG_POLICY_URL: &str = "https://cloudresourcemanager.googleapis.com/v1/projects";
+
+#[derive(Deserialize)]
+struct OrgPolicyResponse {
+    #[serde(rename = "listPolicy")]
+    list_policy: Option<OrgPolicyListPolicy>,
+}
+
+#[derive(Deserialize)]
+struct OrgPolicyListPolicy {
+    #[serde(rename = "allowedValues", default)]
+    allowed_values: Vec<String>,
+    #[serde(rename = "allValues", default)]
+    all_values: Option<String>,
+}
+
+/// Query the effective org policy for `constraints/vertexai.allowedModels`
+/// to get the list of model IDs the project is allowed to use.
+/// Returns `None` if the API call fails (e.g. insufficient permissions).
+async fn fetch_org_policy_allowed_models(
+    client: &dyn HttpClient,
+    access_token: &str,
+    project_id: &str,
+) -> Option<Vec<String>> {
+    let uri = format!(
+        "{ORG_POLICY_URL}/{project_id}:getEffectiveOrgPolicy"
+    );
+    let body = serde_json::json!({
+        "constraint": "constraints/vertexai.allowedModels"
+    });
+
+    let request = HttpRequest::builder()
+        .method(Method::POST)
+        .uri(&uri)
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {access_token}"))
+        .body(AsyncBody::from(serde_json::to_string(&body).ok()?))
+        .ok()?;
+
+    let mut response = client.send(request).await.ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+
+    let mut text = String::new();
+    response.body_mut().read_to_string(&mut text).await.ok()?;
+
+    let policy: OrgPolicyResponse = serde_json::from_str(&text).ok()?;
+    let list_policy = policy.list_policy?;
+
+    // If allValues is "ALLOW", there's no restriction
+    if list_policy.all_values.as_deref() == Some("ALLOW") {
+        return None;
+    }
+
+    // Parse entries like "is:publishers/anthropic/models/claude-sonnet-4-6:predict"
+    // into just the model ID "claude-sonnet-4-6"
+    let model_ids: Vec<String> = list_policy
+        .allowed_values
+        .iter()
+        .filter_map(|entry| {
+            let entry = entry.strip_prefix("is:")?;
+            let entry = entry.strip_suffix(":predict").unwrap_or(entry);
+            let model_id = entry.rsplit('/').next()?;
+            Some(model_id.to_string())
+        })
+        .collect();
+
+    Some(model_ids)
+}
+
+/// Check whether a single model is accessible by making a GET request
+/// to the publisher model endpoint. Returns `true` if the model exists
+/// and the caller has access.
+async fn check_model_accessible(
+    client: &dyn HttpClient,
+    api_url: &str,
+    access_token: &str,
+    project_id: &str,
+    location_id: &str,
+    publisher: &str,
+    model_id: &str,
+) -> bool {
+    let base_url = vertex_base_url(api_url, project_id, location_id);
+    let uri = format!("{base_url}/publishers/{publisher}/models/{model_id}");
+
+    let request = match HttpRequest::builder()
+        .method(Method::GET)
+        .uri(&uri)
+        .header("Authorization", format!("Bearer {access_token}"))
+        .body(AsyncBody::default())
+    {
+        Ok(request) => request,
+        Err(_) => return false,
+    };
+
+    match client.send(request).await {
+        Ok(response) => response.status().is_success(),
+        Err(_) => false,
+    }
+}
+
+fn known_model_to_model(metadata: &KnownModelMetadata) -> Model {
+    Model::Custom {
+        name: metadata.id.to_string(),
+        display_name: Some(metadata.display_name.to_string()),
+        max_tokens: metadata.max_tokens,
+        max_output_tokens: Some(metadata.max_output_tokens),
+        publisher: metadata.publisher.as_str().to_string(),
+        supports_thinking: metadata.supports_thinking,
+    }
+}
+
+/// Fetch the list of models accessible to the authenticated user.
+/// First tries the org policy API (single request), falling back to
+/// per-model availability probing if the org policy is inaccessible.
+pub async fn fetch_available_models(
+    client: Arc<dyn HttpClient>,
+    api_url: String,
+    access_token: String,
+    project_id: String,
+    location_id: String,
+) -> Vec<Model> {
+    // Try org policy first — single API call
+    if let Some(allowed_ids) =
+        fetch_org_policy_allowed_models(client.as_ref(), &access_token, &project_id).await
+    {
+        let models: Vec<Model> = KNOWN_MODELS
+            .iter()
+            .filter(|metadata| allowed_ids.iter().any(|id| id == metadata.id))
+            .map(known_model_to_model)
+            .collect();
+        let model_names: Vec<&str> = models.iter().map(|m| m.id()).collect();
+        log::info!(
+            "Vertex AI: discovered {} models via org policy (project: {}): {:?}",
+            models.len(),
+            project_id,
+            model_names
+        );
+        return models;
+    }
+
+    log::info!("Vertex AI: org policy unavailable, probing models individually");
+
+    // Fallback: probe each model individually
+    let tasks: Vec<_> = KNOWN_MODELS
+        .iter()
+        .map(|metadata| {
+            let client = client.clone();
+            let api_url = api_url.clone();
+            let access_token = access_token.clone();
+            let project_id = project_id.clone();
+            let location_id = location_id.clone();
+            let id = metadata.id;
+            let publisher = metadata.publisher;
+
+            async move {
+                let accessible = check_model_accessible(
+                    client.as_ref(),
+                    &api_url,
+                    &access_token,
+                    &project_id,
+                    &location_id,
+                    publisher.as_str(),
+                    id,
+                )
+                .await;
+                accessible.then_some(id)
+            }
+        })
+        .collect();
+
+    let accessible_ids: Vec<&str> = futures::stream::iter(tasks)
+        .buffer_unordered(5)
+        .filter_map(|result| async move { result })
+        .collect()
+        .await;
+
+    let models: Vec<Model> = KNOWN_MODELS
+        .iter()
+        .filter(|metadata| accessible_ids.contains(&metadata.id))
+        .map(known_model_to_model)
+        .collect();
+    let model_names: Vec<&str> = models.iter().map(|m| m.id()).collect();
+    log::info!(
+        "Vertex AI: discovered {} accessible models via probing: {:?}",
+        models.len(),
+        model_names
+    );
+    models
 }
 
 /// Which publisher a model belongs to on Vertex AI.
@@ -152,6 +459,8 @@ pub enum Model {
         max_tokens: u64,
         max_output_tokens: Option<u64>,
         publisher: String,
+        #[serde(default = "default_true")]
+        supports_thinking: bool,
     },
 }
 
@@ -248,7 +557,13 @@ impl Model {
     }
 
     pub fn supports_thinking(&self) -> bool {
-        !matches!(self, Self::Claude35Haiku)
+        match self {
+            Self::Claude35Haiku => false,
+            Self::Custom {
+                supports_thinking, ..
+            } => *supports_thinking,
+            _ => true,
+        }
     }
 
     /// The model ID to use in the Vertex AI API request URL.

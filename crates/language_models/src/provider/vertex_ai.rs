@@ -42,17 +42,20 @@ pub struct VertexAiLanguageModelProvider {
 }
 
 pub struct State {
-    access_token: Option<String>,
+    access_token: Option<vertex_ai::AccessToken>,
     credentials: Option<vertex_ai::AdcCredentials>,
     project_id: String,
     location_id: String,
     authenticated: bool,
+    fetched_models: Vec<vertex_ai::Model>,
+    fetch_models_task: Option<Task<()>>,
 }
 
 impl State {
     fn is_authenticated(&self) -> bool {
         self.authenticated && self.access_token.is_some()
     }
+
 }
 
 impl VertexAiLanguageModelProvider {
@@ -88,6 +91,8 @@ impl VertexAiLanguageModelProvider {
                 project_id,
                 location_id,
                 authenticated: false,
+                fetched_models: Vec::new(),
+                fetch_models_task: None,
             }
         });
 
@@ -148,14 +153,23 @@ impl LanguageModelProvider for VertexAiLanguageModelProvider {
     }
 
     fn provided_models(&self, cx: &App) -> Vec<Arc<dyn LanguageModel>> {
+        let state = self.state.read(cx);
         let mut models = BTreeMap::default();
 
-        for model in vertex_ai::Model::iter() {
-            if !matches!(model, vertex_ai::Model::Custom { .. }) {
-                models.insert(model.id().to_string(), model);
+        if state.fetched_models.is_empty() {
+            // Before models are fetched, show the hardcoded defaults
+            for model in vertex_ai::Model::iter() {
+                if !matches!(model, vertex_ai::Model::Custom { .. }) {
+                    models.insert(model.id().to_string(), model);
+                }
+            }
+        } else {
+            for model in &state.fetched_models {
+                models.insert(model.id().to_string(), model.clone());
             }
         }
 
+        // Settings-configured models are always included
         for model in &Self::settings(cx).available_models {
             models.insert(
                 model.name.clone(),
@@ -168,6 +182,7 @@ impl LanguageModelProvider for VertexAiLanguageModelProvider {
                         .publisher
                         .clone()
                         .unwrap_or_else(|| "anthropic".to_string()),
+                    supports_thinking: true,
                 },
             );
         }
@@ -199,8 +214,38 @@ impl LanguageModelProvider for VertexAiLanguageModelProvider {
 
             state.update(cx, |state, cx| {
                 state.credentials = Some(credentials);
+                let token_string = access_token.token.clone();
                 state.access_token = Some(access_token);
                 state.authenticated = true;
+
+                let http_client = http_client.clone();
+                let api_url = VertexAiLanguageModelProvider::api_url(cx);
+                let project_id = state.project_id.clone();
+                let location_id = state.location_id.clone();
+
+                let task = cx.spawn(async move |this: gpui::WeakEntity<State>, cx| {
+                    let models = cx
+                        .background_spawn(async move {
+                            vertex_ai::fetch_available_models(
+                                http_client,
+                                api_url,
+                                token_string,
+                                project_id,
+                                location_id,
+                            )
+                            .await
+                        })
+                        .await;
+
+                    this.update(cx, |state, cx| {
+                        state.fetched_models = models;
+                        state.fetch_models_task = None;
+                        cx.notify();
+                    })
+                    .log_err();
+                });
+                state.fetch_models_task = Some(task);
+
                 cx.notify();
             });
 
@@ -223,6 +268,8 @@ impl LanguageModelProvider for VertexAiLanguageModelProvider {
             state.access_token = None;
             state.credentials = None;
             state.authenticated = false;
+            state.fetched_models.clear();
+            state.fetch_models_task = None;
             cx.notify();
             Task::ready(Ok(()))
         })
@@ -322,6 +369,7 @@ impl LanguageModel for VertexAiLanguageModel {
             let api_url = VertexAiLanguageModelProvider::api_url(cx);
             (
                 state.access_token.clone(),
+                state.credentials.clone(),
                 state.project_id.clone(),
                 state.location_id.clone(),
                 api_url,
@@ -329,12 +377,29 @@ impl LanguageModel for VertexAiLanguageModel {
         });
 
         let future = self.request_limiter.stream(async move {
-            let (access_token, project_id, location_id, api_url) = state_data;
-            let access_token = access_token.ok_or_else(|| {
-                LanguageModelCompletionError::NoApiKey {
-                    provider: PROVIDER_NAME,
+            let (mut access_token, credentials, project_id, location_id, api_url) = state_data;
+
+            // Auto-refresh token if expired
+            if access_token.as_ref().map(|t| t.is_expired()).unwrap_or(true) {
+                if let Some(credentials) = &credentials {
+                    match vertex_ai::refresh_access_token(http_client.as_ref(), credentials).await {
+                        Ok(new_token) => {
+                            log::info!("Vertex AI: refreshed expired access token");
+                            access_token = Some(new_token);
+                        }
+                        Err(error) => {
+                            log::error!("Vertex AI: failed to refresh token: {error}");
+                        }
+                    }
                 }
-            })?;
+            }
+
+            let token_string = access_token
+                .as_ref()
+                .map(|t| t.token.clone())
+                .ok_or_else(|| LanguageModelCompletionError::NoApiKey {
+                    provider: PROVIDER_NAME,
+                })?;
 
             let stream: futures::stream::BoxStream<
                 'static,
@@ -349,7 +414,7 @@ impl LanguageModel for VertexAiLanguageModel {
                     let response = vertex_ai::stream_generate_content(
                         http_client.as_ref(),
                         &api_url,
-                        &access_token,
+                        &token_string,
                         &project_id,
                         &location_id,
                         model.vertex_model_id(),
@@ -378,7 +443,7 @@ impl LanguageModel for VertexAiLanguageModel {
                     let response = vertex_ai::stream_raw_predict(
                         http_client.as_ref(),
                         &api_url,
-                        &access_token,
+                        &token_string,
                         &project_id,
                         &location_id,
                         model.vertex_model_id(),
