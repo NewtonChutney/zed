@@ -10,7 +10,7 @@ use crate::provider::{
     mistral::MistralSettings, ollama::OllamaSettings, open_ai::OpenAiSettings,
     open_ai_compatible::OpenAiCompatibleSettings, open_router, open_router::OpenRouterSettings,
     opencode, opencode::OpenCodeSettings, resolve_custom_headers,
-    vercel_ai_gateway::VercelAiGatewaySettings, x_ai::XAiSettings,
+    vercel_ai_gateway::VercelAiGatewaySettings, vertex_ai::VertexAiSettings, x_ai::XAiSettings,
 };
 
 #[derive(Debug, RegisterSetting)]
@@ -29,6 +29,7 @@ pub struct AllLanguageModelSettings {
     pub openai: OpenAiSettings,
     pub openai_compatible: HashMap<Arc<str>, OpenAiCompatibleSettings>,
     pub vercel_ai_gateway: VercelAiGatewaySettings,
+    pub vertex_ai: VertexAiSettings,
     pub x_ai: XAiSettings,
     pub zed_dot_dev: ZedDotDevSettings,
 }
@@ -63,6 +64,7 @@ impl settings::Settings for AllLanguageModelSettings {
         let openai = language_models.openai.unwrap();
         let openai_compatible = language_models.openai_compatible.unwrap();
         let vercel_ai_gateway = language_models.vercel_ai_gateway.unwrap();
+        let vertex_ai = language_models.vertex_ai.unwrap_or_default();
         let x_ai = language_models.x_ai.unwrap();
         let zed_dot_dev = language_models.zed_dot_dev.unwrap();
         Self {
@@ -200,6 +202,12 @@ impl settings::Settings for AllLanguageModelSettings {
                     vercel_ai_gateway.custom_headers,
                     &[],
                 ),
+            },
+            vertex_ai: VertexAiSettings {
+                api_url: vertex_ai.api_url.unwrap_or_default(),
+                project_id: vertex_ai.project_id.unwrap_or_default(),
+                location_id: vertex_ai.location_id.unwrap_or_default(),
+                available_models: vertex_ai.available_models.unwrap_or_default(),
             },
             x_ai: XAiSettings {
                 api_url: x_ai.api_url.unwrap(),
