@@ -29,6 +29,7 @@ use crate::provider::open_ai_compatible::OpenAiCompatibleLanguageModelProvider;
 use crate::provider::open_router::OpenRouterLanguageModelProvider;
 use crate::provider::opencode::OpenCodeLanguageModelProvider;
 use crate::provider::vercel_ai_gateway::VercelAiGatewayLanguageModelProvider;
+use crate::provider::vertex_ai::VertexAiLanguageModelProvider;
 use crate::provider::x_ai::XAiLanguageModelProvider;
 pub use crate::settings::*;
 
@@ -327,6 +328,10 @@ fn register_language_model_providers(
             credentials_provider,
             cx,
         )),
+        cx,
+    );
+    registry.register_provider(
+        Arc::new(VertexAiLanguageModelProvider::new(client.http_client(), cx)),
         cx,
     );
     registry.register_provider(Arc::new(CopilotChatLanguageModelProvider::new(cx)), cx);

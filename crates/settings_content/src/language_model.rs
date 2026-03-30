@@ -21,6 +21,7 @@ pub struct AllLanguageModelSettingsContent {
     pub open_router: Option<OpenRouterSettingsContent>,
     pub openai: Option<OpenAiSettingsContent>,
     pub openai_compatible: Option<HashMap<Arc<str>, OpenAiCompatibleSettingsContent>>,
+    pub vertex_ai: Option<VertexAiSettingsContent>,
     pub vercel_ai_gateway: Option<VercelAiGatewaySettingsContent>,
     pub x_ai: Option<XAiSettingsContent>,
     #[serde(rename = "zed.dev")]
@@ -346,6 +347,29 @@ pub struct VercelAiGatewayAvailableModel {
     pub max_completion_tokens: Option<u64>,
     #[serde(default)]
     pub capabilities: OpenAiCompatibleModelCapabilities,
+}
+
+#[with_fallible_options]
+#[derive(Default, Clone, Debug, Serialize, Deserialize, PartialEq, JsonSchema, MergeFrom)]
+pub struct VertexAiSettingsContent {
+    /// The base API URL for Vertex AI. Defaults to us-central1.
+    pub api_url: Option<String>,
+    /// The Google Cloud project ID.
+    pub project_id: Option<String>,
+    /// The Google Cloud location/region (e.g. "us-central1").
+    pub location_id: Option<String>,
+    pub available_models: Option<Vec<VertexAiAvailableModel>>,
+}
+
+#[with_fallible_options]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom)]
+pub struct VertexAiAvailableModel {
+    pub name: String,
+    pub display_name: Option<String>,
+    pub max_tokens: u64,
+    pub max_output_tokens: Option<u64>,
+    /// The publisher: "google" or "anthropic".
+    pub publisher: Option<String>,
 }
 
 #[with_fallible_options]

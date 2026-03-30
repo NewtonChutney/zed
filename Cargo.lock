@@ -9659,6 +9659,7 @@ dependencies = [
  "ui",
  "ui_input",
  "util",
+ "vertex_ai",
  "x_ai",
 ]
 
@@ -19456,6 +19457,23 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "vertex_ai"
+version = "0.1.0"
+dependencies = [
+ "anthropic",
+ "anyhow",
+ "dirs",
+ "futures 0.3.32",
+ "google_ai",
+ "http_client",
+ "log",
+ "schemars 1.0.4",
+ "serde",
+ "serde_json",
+ "strum 0.27.2",
+]
 
 [[package]]
 name = "vim"
