@@ -340,14 +340,6 @@ impl LanguageModel for VertexAiLanguageModel {
         self.model.max_output_tokens()
     }
 
-    fn count_tokens(
-        &self,
-        request: LanguageModelRequest,
-        cx: &App,
-    ) -> BoxFuture<'static, Result<u64>> {
-        crate::provider::google::count_google_tokens(request, cx)
-    }
-
     fn stream_completion(
         &self,
         request: LanguageModelRequest,
