@@ -16,7 +16,7 @@ use language_model::{
 pub use settings::VertexAiAvailableModel as AvailableModel;
 use settings::{Settings, SettingsStore};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use strum::IntoEnumIterator;
 use ui::{ConfiguredApiCard, List, ListBulletItem, prelude::*};
 use util::ResultExt;
@@ -41,8 +41,13 @@ pub struct VertexAiLanguageModelProvider {
     state: Entity<State>,
 }
 
+/// Thread-safe shared storage for the access token, so that both entity
+/// updates (which need `&mut App`) and `stream_completion` (which only
+/// has `&AsyncApp`) can read and write the current token.
+type SharedAccessToken = Arc<StdMutex<Option<vertex_ai::AccessToken>>>;
+
 pub struct State {
-    access_token: Option<vertex_ai::AccessToken>,
+    shared_access_token: SharedAccessToken,
     credentials: Option<vertex_ai::AdcCredentials>,
     project_id: String,
     location_id: String,
@@ -53,9 +58,12 @@ pub struct State {
 
 impl State {
     fn is_authenticated(&self) -> bool {
-        self.authenticated && self.access_token.is_some()
+        self.authenticated && self.shared_access_token.lock().unwrap_or_else(|e| e.into_inner()).is_some()
     }
 
+    fn set_access_token(&self, token: Option<vertex_ai::AccessToken>) {
+        *self.shared_access_token.lock().unwrap_or_else(|e| e.into_inner()) = token;
+    }
 }
 
 impl VertexAiLanguageModelProvider {
@@ -72,6 +80,8 @@ impl VertexAiLanguageModelProvider {
             settings.location_id.clone()
         };
 
+        let shared_access_token: SharedAccessToken = Arc::new(StdMutex::new(None));
+
         let state = cx.new(|cx| {
             cx.observe_global::<SettingsStore>(|this: &mut State, cx| {
                 let settings = VertexAiLanguageModelProvider::settings(cx);
@@ -86,7 +96,7 @@ impl VertexAiLanguageModelProvider {
             .detach();
 
             State {
-                access_token: None,
+                shared_access_token,
                 credentials: None,
                 project_id,
                 location_id,
@@ -215,7 +225,7 @@ impl LanguageModelProvider for VertexAiLanguageModelProvider {
             state.update(cx, |state, cx| {
                 state.credentials = Some(credentials);
                 let token_string = access_token.token.clone();
-                state.access_token = Some(access_token);
+                state.set_access_token(Some(access_token));
                 state.authenticated = true;
 
                 let http_client = http_client.clone();
@@ -265,7 +275,7 @@ impl LanguageModelProvider for VertexAiLanguageModelProvider {
 
     fn reset_credentials(&self, cx: &mut App) -> Task<Result<()>> {
         self.state.update(cx, |state, cx| {
-            state.access_token = None;
+            state.set_access_token(None);
             state.credentials = None;
             state.authenticated = false;
             state.fetched_models.clear();
@@ -357,34 +367,53 @@ impl LanguageModel for VertexAiLanguageModel {
         let http_client = self.http_client.clone();
         let model = self.model.clone();
 
-        let state_data = self.state.read_with(cx, |state, cx| {
-            let api_url = VertexAiLanguageModelProvider::api_url(cx);
-            (
-                state.access_token.clone(),
-                state.credentials.clone(),
-                state.project_id.clone(),
-                state.location_id.clone(),
-                api_url,
-            )
-        });
+        let (shared_access_token, credentials, project_id, location_id, api_url) =
+            self.state.read_with(cx, |state, cx| {
+                let api_url = VertexAiLanguageModelProvider::api_url(cx);
+                (
+                    state.shared_access_token.clone(),
+                    state.credentials.clone(),
+                    state.project_id.clone(),
+                    state.location_id.clone(),
+                    api_url,
+                )
+            });
 
         let future = self.request_limiter.stream(async move {
-            let (mut access_token, credentials, project_id, location_id, api_url) = state_data;
+            // Read the current token from shared state
+            let current_token = shared_access_token
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
 
-            // Auto-refresh token if expired
-            if access_token.as_ref().map(|t| t.is_expired()).unwrap_or(true) {
+            // Refresh if the token is missing or expired
+            let access_token = if current_token
+                .as_ref()
+                .map(|t| t.is_expired())
+                .unwrap_or(true)
+            {
                 if let Some(credentials) = &credentials {
                     match vertex_ai::refresh_access_token(http_client.as_ref(), credentials).await {
                         Ok(new_token) => {
                             log::info!("Vertex AI: refreshed expired access token");
-                            access_token = Some(new_token);
+                            // Persist the refreshed token back to shared state so
+                            // subsequent requests reuse it instead of re-refreshing.
+                            *shared_access_token
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner()) = Some(new_token.clone());
+                            Some(new_token)
                         }
                         Err(error) => {
                             log::error!("Vertex AI: failed to refresh token: {error}");
+                            current_token
                         }
                     }
+                } else {
+                    current_token
                 }
-            }
+            } else {
+                current_token
+            };
 
             let token_string = access_token
                 .as_ref()
