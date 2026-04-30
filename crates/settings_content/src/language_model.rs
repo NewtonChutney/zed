@@ -352,23 +352,36 @@ pub struct VercelAiGatewayAvailableModel {
 #[with_fallible_options]
 #[derive(Default, Clone, Debug, Serialize, Deserialize, PartialEq, JsonSchema, MergeFrom)]
 pub struct VertexAiSettingsContent {
-    /// The base API URL for Vertex AI. Defaults to us-central1.
+    /// The base API URL for Vertex AI. If not specified, defaults to the Google-managed
+    /// endpoint for the specified location (e.g. https://us-east5-aiplatform.googleapis.com).
+    /// Use this to override the endpoint for custom domains or regional deployments.
     pub api_url: Option<String>,
-    /// The Google Cloud project ID.
+    /// Your Google Cloud project ID. This is required to use Vertex AI.
+    /// You can find it in the Google Cloud Console under "Project settings".
     pub project_id: Option<String>,
-    /// The Google Cloud location/region (e.g. "us-central1").
+    /// The Google Cloud region where your Vertex AI resources are deployed
+    /// (e.g. "us-central1", "us-east5", "europe-west1").
+    /// Defaults to "us-east5" if not specified.
     pub location_id: Option<String>,
+    /// List of custom models to make available for use.
+    /// Models are also automatically discovered from your Google Cloud project.
     pub available_models: Option<Vec<VertexAiAvailableModel>>,
 }
 
 #[with_fallible_options]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom)]
 pub struct VertexAiAvailableModel {
+    /// The model identifier as it appears in Google Cloud (e.g. "gemini-2.0-pro", "claude-3-5-sonnet@20241022").
     pub name: String,
+    /// A human-readable display name for the model. Defaults to the model name if not specified.
     pub display_name: Option<String>,
+    /// The maximum number of input tokens the model supports.
     pub max_tokens: u64,
+    /// The maximum number of tokens the model can generate in a single response.
+    /// If not specified, defaults to the model's default maximum.
     pub max_output_tokens: Option<u64>,
-    /// The publisher: "google" or "anthropic".
+    /// The model publisher: "google" for Gemini models or "anthropic" for Claude models.
+    /// Defaults to "anthropic" if not specified.
     pub publisher: Option<String>,
 }
 

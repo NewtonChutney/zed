@@ -829,6 +829,85 @@ You can also set a custom endpoint for Vercel AI Gateway in your settings file:
 }
 ```
 
+### Vertex AI {#vertex-ai}
+
+Zed includes a dedicated [Google Vertex AI](https://cloud.google.com/vertex-ai) provider. Vertex AI gives you access to Google's Gemini models and Claude models from Anthropic, all through Google Cloud's managed service.
+
+#### Authentication
+
+Vertex AI uses Google Cloud's Application Default Credentials (ADC) for authentication. To set this up:
+
+1. [Install the Google Cloud CLI](https://cloud.google.com/sdk/docs/install)
+2. Run `gcloud auth application-default login` to authenticate
+3. Zed will automatically use your credentials
+
+You can also authenticate by setting the `GOOGLE_APPLICATION_CREDENTIALS` environment variable to point to a service account JSON key file.
+
+#### Configuration
+
+Add the following to your Zed settings file to configure Vertex AI ([how to edit](../configuring-zed.md#settings-files)):
+
+```json [settings]
+{
+  "language_models": {
+    "vertex_ai": {
+      "project_id": "your-google-cloud-project-id",
+      "location_id": "us-central1"
+    }
+  }
+}
+```
+
+**Required Settings:**
+- `project_id` — Your Google Cloud project ID. You can find this in the [Google Cloud Console](https://console.cloud.google.com/project) under "Project settings"
+
+**Optional Settings:**
+- `location_id` — The Google Cloud region for Vertex AI (defaults to `us-east5`). Common regions include:
+  - `us-central1`
+  - `us-east1`
+  - `us-east5`
+  - `europe-west1`
+  - `asia-northeast1`
+- `api_url` — The base API URL for Vertex AI. Leave unset to use Google's managed endpoint (recommended)
+
+#### Custom Models {#vertex-ai-custom-models}
+
+Vertex AI comes pre-configured with available Gemini and Claude models. If you want to customize available models or add custom model configurations, you can add them to your settings:
+
+```json [settings]
+{
+  "language_models": {
+    "vertex_ai": {
+      "project_id": "your-google-cloud-project-id",
+      "location_id": "us-central1",
+      "available_models": [
+        {
+          "name": "gemini-2.0-pro-exp-02-05",
+          "display_name": "Gemini 2.0 Pro",
+          "max_tokens": 1000000,
+          "max_output_tokens": 8192,
+          "publisher": "google"
+        },
+        {
+          "name": "claude-3-5-sonnet@20241022",
+          "display_name": "Claude 3.5 Sonnet",
+          "max_tokens": 200000,
+          "max_output_tokens": 4096,
+          "publisher": "anthropic"
+        }
+      ]
+    }
+  }
+}
+```
+
+**Model Configuration:**
+- `name` — The model ID as it appears in Google Cloud (required)
+- `display_name` — A human-readable name for the model (optional)
+- `max_tokens` — Maximum input tokens the model supports (required)
+- `max_output_tokens` — Maximum output tokens the model can generate (optional)
+- `publisher` — Either `"google"` for Gemini models or `"anthropic"` for Claude models (optional, defaults to `"anthropic"`)
+
 ### xAI {#xai}
 
 Zed includes a dedicated [xAI](https://x.ai/) provider. You can use your own API key to access Grok models.
