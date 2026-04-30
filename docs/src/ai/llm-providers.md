@@ -852,7 +852,7 @@ Add the following to your Zed settings file to configure Vertex AI ([how to edit
   "language_models": {
     "vertex_ai": {
       "project_id": "your-google-cloud-project-id",
-      "location_id": "us-central1"
+      "location_id": "global"
     }
   }
 }
@@ -862,7 +862,8 @@ Add the following to your Zed settings file to configure Vertex AI ([how to edit
 - `project_id` — Your Google Cloud project ID. You can find this in the [Google Cloud Console](https://console.cloud.google.com/project) under "Project settings"
 
 **Optional Settings:**
-- `location_id` — The Google Cloud region for Vertex AI (defaults to `us-east5`). Common regions include:
+- `location_id` — The Google Cloud region for Vertex AI (defaults to `"global"`). Specify a region like `"us-central1"` or `"us-east5"` if needed:
+  - `global` (for globally-available models)
   - `us-central1`
   - `us-east1`
   - `us-east5`

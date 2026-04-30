@@ -575,7 +575,11 @@ impl Model {
 
 fn vertex_base_url(api_url: &str, project_id: &str, location_id: &str) -> String {
     let host = if api_url == DEFAULT_API_URL {
-        format!("https://{location_id}-aiplatform.googleapis.com")
+        if location_id == "global" {
+            "https://aiplatform.googleapis.com".to_string()
+        } else {
+            format!("https://{location_id}-aiplatform.googleapis.com")
+        }
     } else {
         api_url.to_string()
     };

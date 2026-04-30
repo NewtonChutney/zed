@@ -75,7 +75,7 @@ impl VertexAiLanguageModelProvider {
             settings.project_id.clone()
         };
         let location_id = if settings.location_id.is_empty() {
-            "us-east5".to_string()
+            "global".to_string()
         } else {
             settings.location_id.clone()
         };

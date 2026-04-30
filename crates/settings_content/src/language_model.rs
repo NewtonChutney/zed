@@ -359,9 +359,10 @@ pub struct VertexAiSettingsContent {
     /// Your Google Cloud project ID. This is required to use Vertex AI.
     /// You can find it in the Google Cloud Console under "Project settings".
     pub project_id: Option<String>,
-    /// The Google Cloud region where your Vertex AI resources are deployed
-    /// (e.g. "us-central1", "us-east5", "europe-west1").
-    /// Defaults to "us-east5" if not specified.
+    /// The Google Cloud region where your Vertex AI resources are deployed.
+    /// Use "global" for globally-available models, or specify a region like
+    /// "us-central1", "us-east5", or "europe-west1".
+    /// Defaults to "global" if not specified.
     pub location_id: Option<String>,
     /// List of custom models to make available for use.
     /// Models are also automatically discovered from your Google Cloud project.
