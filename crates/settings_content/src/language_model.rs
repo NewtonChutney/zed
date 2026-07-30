@@ -509,9 +509,32 @@ pub struct VertexAiSettingsContent {
     /// "us-central1", "us-east5", or "europe-west1".
     /// Defaults to "global" if not specified.
     pub location_id: Option<String>,
+    /// The authentication method to use. If not specified, defaults to "automatic"
+    /// which tries environment variables first, then Application Default Credentials.
+    pub authentication_method: Option<VertexAiAuthMethodContent>,
+    /// Path to a Google Cloud service account JSON key file.
+    /// Only used when authentication_method is "service_account_key_file".
+    /// Can also be set via the ZED_GOOGLE_APPLICATION_CREDENTIALS environment variable.
+    pub service_account_key_file: Option<String>,
     /// List of custom models to make available for use.
     /// Models are also automatically discovered from your Google Cloud project.
     pub available_models: Option<Vec<VertexAiAvailableModel>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom)]
+pub enum VertexAiAuthMethodContent {
+    /// Application Default Credentials from gcloud CLI.
+    #[serde(rename = "adc")]
+    Adc,
+    /// Service account JSON key file.
+    #[serde(rename = "service_account_key_file")]
+    ServiceAccountKeyFile,
+    /// Pre-obtained OAuth2 access token.
+    #[serde(rename = "access_token")]
+    AccessToken,
+    /// Automatic: tries env var token, env var key file, then ADC.
+    #[serde(rename = "automatic")]
+    Automatic,
 }
 
 #[with_fallible_options]

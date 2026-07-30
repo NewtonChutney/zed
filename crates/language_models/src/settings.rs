@@ -207,6 +207,8 @@ impl settings::Settings for AllLanguageModelSettings {
                 api_url: vertex_ai.api_url.unwrap_or_default(),
                 project_id: vertex_ai.project_id.unwrap_or_default(),
                 location_id: vertex_ai.location_id.unwrap_or_default(),
+                authentication_method: vertex_ai.authentication_method.map(Into::into),
+                service_account_key_file: vertex_ai.service_account_key_file,
                 available_models: vertex_ai.available_models.unwrap_or_default(),
             },
             x_ai: XAiSettings {

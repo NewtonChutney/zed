@@ -334,7 +334,11 @@ fn register_language_model_providers(
         cx,
     );
     registry.register_provider(
-        Arc::new(VertexAiLanguageModelProvider::new(client.http_client(), cx)),
+        Arc::new(VertexAiLanguageModelProvider::new(
+            client.http_client(),
+            credentials_provider.clone(),
+            cx,
+        )),
         cx,
     );
     registry.register_provider(Arc::new(CopilotChatLanguageModelProvider::new(cx)), cx);

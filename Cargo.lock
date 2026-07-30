@@ -20260,6 +20260,7 @@ dependencies = [
  "futures 0.3.32",
  "google_ai",
  "http_client",
+ "jsonwebtoken",
  "log",
  "schemars 1.0.4",
  "serde",

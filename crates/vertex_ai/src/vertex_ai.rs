@@ -1,10 +1,11 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, anyhow};
 use futures::{AsyncBufReadExt, AsyncReadExt, StreamExt, io::BufReader, stream::BoxStream};
 use http_client::{AsyncBody, HttpClient, Method, Request as HttpRequest};
+use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use serde::{Deserialize, Serialize};
 use strum::EnumIter;
 
@@ -17,6 +18,10 @@ struct KnownModelMetadata {
     max_tokens: u64,
     max_output_tokens: u64,
     supports_thinking: bool,
+    /// Whether the model accepts Anthropic's `thinking: {type: "adaptive"}` mode.
+    /// Models before Claude 4.6 (and all Haiku models) only support the legacy
+    /// `enabled`/`disabled` thinking config and reject `adaptive` with a 400.
+    supports_adaptive_thinking: bool,
 }
 
 const KNOWN_MODELS: &[KnownModelMetadata] = &[
@@ -27,6 +32,7 @@ const KNOWN_MODELS: &[KnownModelMetadata] = &[
         max_tokens: 1_048_576,
         max_output_tokens: 65_536,
         supports_thinking: true,
+        supports_adaptive_thinking: false,
     },
     KnownModelMetadata {
         id: "gemini-2.5-flash",
@@ -35,6 +41,16 @@ const KNOWN_MODELS: &[KnownModelMetadata] = &[
         max_tokens: 1_048_576,
         max_output_tokens: 65_536,
         supports_thinking: true,
+        supports_adaptive_thinking: false,
+    },
+    KnownModelMetadata {
+        id: "claude-sonnet-5",
+        display_name: "Claude Sonnet 5 (Vertex)",
+        publisher: Publisher::Anthropic,
+        max_tokens: 1_000_000,
+        max_output_tokens: 128_000,
+        supports_thinking: true,
+        supports_adaptive_thinking: true,
     },
     KnownModelMetadata {
         id: "claude-sonnet-4-6",
@@ -43,6 +59,7 @@ const KNOWN_MODELS: &[KnownModelMetadata] = &[
         max_tokens: 1_000_000,
         max_output_tokens: 64_000,
         supports_thinking: true,
+        supports_adaptive_thinking: true,
     },
     KnownModelMetadata {
         id: "claude-sonnet-4-5",
@@ -51,6 +68,7 @@ const KNOWN_MODELS: &[KnownModelMetadata] = &[
         max_tokens: 200_000,
         max_output_tokens: 64_000,
         supports_thinking: true,
+        supports_adaptive_thinking: false,
     },
     KnownModelMetadata {
         id: "claude-sonnet-4",
@@ -59,6 +77,34 @@ const KNOWN_MODELS: &[KnownModelMetadata] = &[
         max_tokens: 200_000,
         max_output_tokens: 64_000,
         supports_thinking: true,
+        supports_adaptive_thinking: false,
+    },
+    KnownModelMetadata {
+        id: "claude-opus-5",
+        display_name: "Claude Opus 5 (Vertex)",
+        publisher: Publisher::Anthropic,
+        max_tokens: 1_000_000,
+        max_output_tokens: 128_000,
+        supports_thinking: true,
+        supports_adaptive_thinking: true,
+    },
+    KnownModelMetadata {
+        id: "claude-opus-4-8",
+        display_name: "Claude Opus 4.8 (Vertex)",
+        publisher: Publisher::Anthropic,
+        max_tokens: 1_000_000,
+        max_output_tokens: 128_000,
+        supports_thinking: true,
+        supports_adaptive_thinking: true,
+    },
+    KnownModelMetadata {
+        id: "claude-opus-4-7",
+        display_name: "Claude Opus 4.7 (Vertex)",
+        publisher: Publisher::Anthropic,
+        max_tokens: 1_000_000,
+        max_output_tokens: 128_000,
+        supports_thinking: true,
+        supports_adaptive_thinking: true,
     },
     KnownModelMetadata {
         id: "claude-opus-4-6",
@@ -67,6 +113,7 @@ const KNOWN_MODELS: &[KnownModelMetadata] = &[
         max_tokens: 1_000_000,
         max_output_tokens: 128_000,
         supports_thinking: true,
+        supports_adaptive_thinking: true,
     },
     KnownModelMetadata {
         id: "claude-opus-4-5",
@@ -75,6 +122,7 @@ const KNOWN_MODELS: &[KnownModelMetadata] = &[
         max_tokens: 200_000,
         max_output_tokens: 32_000,
         supports_thinking: true,
+        supports_adaptive_thinking: false,
     },
     KnownModelMetadata {
         id: "claude-haiku-4-5",
@@ -83,6 +131,7 @@ const KNOWN_MODELS: &[KnownModelMetadata] = &[
         max_tokens: 200_000,
         max_output_tokens: 64_000,
         supports_thinking: true,
+        supports_adaptive_thinking: false,
     },
     KnownModelMetadata {
         id: "claude-3-5-haiku",
@@ -91,7 +140,43 @@ const KNOWN_MODELS: &[KnownModelMetadata] = &[
         max_tokens: 200_000,
         max_output_tokens: 8_192,
         supports_thinking: false,
+        supports_adaptive_thinking: false,
     },
+    KnownModelMetadata {
+        id: "claude-fable-5",
+        display_name: "Claude Fable 5 (Vertex)",
+        publisher: Publisher::Anthropic,
+        max_tokens: 1_000_000,
+        max_output_tokens: 128_000,
+        supports_thinking: true,
+        supports_adaptive_thinking: true,
+    },
+    KnownModelMetadata {
+        id: "claude-mythos-5",
+        display_name: "Claude Mythos 5 (Vertex)",
+        publisher: Publisher::Anthropic,
+        max_tokens: 1_000_000,
+        max_output_tokens: 128_000,
+        supports_thinking: true,
+        supports_adaptive_thinking: true,
+    },
+];
+
+/// Anthropic model IDs on Vertex AI that have been confirmed to support
+/// Claude's `thinking: {type: "adaptive"}` mode. Used to classify Anthropic
+/// models discovered dynamically (e.g. via org policy) that aren't in
+/// `KNOWN_MODELS`. Anything not in this list falls back to the legacy
+/// `enabled`/`disabled` thinking config, since sending `adaptive` to an
+/// unsupported model is rejected with a 400.
+const ADAPTIVE_THINKING_MODEL_IDS: &[&str] = &[
+    "claude-sonnet-4-6",
+    "claude-opus-4-6",
+    "claude-opus-4-7",
+    "claude-opus-4-8",
+    "claude-opus-5",
+    "claude-sonnet-5",
+    "claude-fable-5",
+    "claude-mythos-5",
 ];
 
 pub const DEFAULT_API_URL: &str = "https://us-east5-aiplatform.googleapis.com";
@@ -177,6 +262,39 @@ pub fn read_default_project() -> Result<String> {
     Err(anyhow!("No project found in gcloud config"))
 }
 
+/// Sends a token-endpoint request and parses the resulting `AccessToken`.
+/// Shared by the ADC refresh flow and the service-account JWT exchange,
+/// which differ only in how they build the request.
+async fn send_token_request(
+    client: &dyn HttpClient,
+    request: HttpRequest<AsyncBody>,
+    error_context: &str,
+) -> Result<AccessToken> {
+    let mut response = client.send(request).await?;
+    let mut text = String::new();
+    response.body_mut().read_to_string(&mut text).await?;
+
+    anyhow::ensure!(
+        response.status().is_success(),
+        "{error_context}: {} {}",
+        response.status(),
+        text
+    );
+
+    let token_response: TokenResponse =
+        serde_json::from_str(&text).context("Failed to parse token response")?;
+
+    // Refresh 60 seconds before actual expiry to avoid races
+    let expires_at = token_response
+        .expires_in
+        .map(|secs| Instant::now() + Duration::from_secs(secs.saturating_sub(60)));
+
+    Ok(AccessToken {
+        token: token_response.access_token,
+        expires_at,
+    })
+}
+
 pub async fn refresh_access_token(
     client: &dyn HttpClient,
     credentials: &AdcCredentials,
@@ -194,29 +312,78 @@ pub async fn refresh_access_token(
         .header("Content-Type", "application/json")
         .body(AsyncBody::from(serde_json::to_string(&body)?))?;
 
-    let mut response = client.send(request).await?;
-    let mut text = String::new();
-    response.body_mut().read_to_string(&mut text).await?;
+    send_token_request(client, request, "Failed to refresh access token").await
+}
 
-    anyhow::ensure!(
-        response.status().is_success(),
-        "Failed to refresh access token: {} {}",
-        response.status(),
-        text
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ServiceAccountCredentials {
+    pub project_id: Option<String>,
+    pub private_key: String,
+    pub client_email: String,
+    pub token_uri: Option<String>,
+}
+
+pub fn read_service_account_credentials(path: &str) -> Result<ServiceAccountCredentials> {
+    let contents = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read service account key file at {path}"))?;
+    serde_json::from_str(&contents).context("Failed to parse service account key file")
+}
+
+#[derive(Serialize)]
+struct JwtClaims {
+    iss: String,
+    scope: String,
+    aud: String,
+    iat: u64,
+    exp: u64,
+}
+
+pub async fn exchange_service_account_token(
+    client: &dyn HttpClient,
+    credentials: &ServiceAccountCredentials,
+) -> Result<AccessToken> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("System time before UNIX epoch")?
+        .as_secs();
+
+    let token_uri = credentials
+        .token_uri
+        .as_deref()
+        .unwrap_or(TOKEN_ENDPOINT);
+
+    let claims = JwtClaims {
+        iss: credentials.client_email.clone(),
+        scope: "https://www.googleapis.com/auth/cloud-platform".to_string(),
+        aud: token_uri.to_string(),
+        iat: now,
+        exp: now + 3600,
+    };
+
+    let key = EncodingKey::from_rsa_pem(credentials.private_key.as_bytes())
+        .context("Failed to parse service account private key")?;
+
+    let jwt = jsonwebtoken::encode(&Header::new(Algorithm::RS256), &claims, &key)
+        .context("Failed to create JWT for service account")?;
+
+    let body = format!(
+        "grant_type={}&assertion={}",
+        "urn:ietf:params:oauth:grant-type:jwt-bearer",
+        jwt
     );
 
-    let token_response: TokenResponse =
-        serde_json::from_str(&text).context("Failed to parse token response")?;
+    let request = HttpRequest::builder()
+        .method(Method::POST)
+        .uri(token_uri)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(AsyncBody::from(body))?;
 
-    // Refresh 60 seconds before actual expiry to avoid races
-    let expires_at = token_response
-        .expires_in
-        .map(|secs| Instant::now() + Duration::from_secs(secs.saturating_sub(60)));
-
-    Ok(AccessToken {
-        token: token_response.access_token,
-        expires_at,
-    })
+    send_token_request(
+        client,
+        request,
+        "Failed to exchange service account JWT for access token",
+    )
+    .await
 }
 
 const ORG_POLICY_URL: &str = "https://cloudresourcemanager.googleapis.com/v1/projects";
@@ -334,6 +501,7 @@ fn known_model_to_model(metadata: &KnownModelMetadata) -> Model {
         max_output_tokens: Some(metadata.max_output_tokens),
         publisher: metadata.publisher.as_str().to_string(),
         supports_thinking: metadata.supports_thinking,
+        supports_adaptive_thinking: metadata.supports_adaptive_thinking,
     }
 }
 
@@ -350,6 +518,8 @@ fn model_from_discovered(model_id: &str, publisher: &str) -> Model {
             (200_000, 8_192, false)
         }
     };
+    let supports_adaptive_thinking =
+        publisher == "anthropic" && ADAPTIVE_THINKING_MODEL_IDS.contains(&model_id);
 
     let display_name = format_model_display_name(model_id);
 
@@ -360,6 +530,7 @@ fn model_from_discovered(model_id: &str, publisher: &str) -> Model {
         max_output_tokens: Some(max_output_tokens),
         publisher: publisher.to_string(),
         supports_thinking,
+        supports_adaptive_thinking,
     }
 }
 
@@ -511,12 +682,24 @@ pub enum Model {
         publisher: String,
         #[serde(default = "default_true")]
         supports_thinking: bool,
+        #[serde(default)]
+        supports_adaptive_thinking: bool,
     },
 }
 
+pub const FAST_MODEL_PREFERENCE: &[&str] = &[
+    "gemini-3-flash",
+    "gemini-3.5-flash",
+    "gemini-3-1-flash-lite",
+    "claude-haiku-4-5",
+    "claude-3-5-haiku",
+    "gemini-2.5-flash-lite",
+    "gemini-2.5-flash",
+];
+
 impl Model {
     pub fn default_fast() -> Self {
-        Self::Claude35Haiku
+        Self::ClaudeHaiku4_5
     }
 
     pub fn publisher(&self) -> Publisher {
@@ -613,6 +796,25 @@ impl Model {
                 supports_thinking, ..
             } => *supports_thinking,
             _ => true,
+        }
+    }
+
+    /// Whether the model accepts Anthropic's `thinking: {type: "adaptive"}` mode.
+    /// Models before Claude 4.6 only support the legacy `enabled`/`disabled`
+    /// thinking config and reject `adaptive` with a 400.
+    pub fn supports_adaptive_thinking(&self) -> bool {
+        match self {
+            Self::ClaudeSonnet4_6 | Self::ClaudeOpus4_6 => true,
+            Self::ClaudeSonnet4_5
+            | Self::ClaudeSonnet4
+            | Self::ClaudeOpus4_5
+            | Self::ClaudeHaiku4_5
+            | Self::Claude35Haiku
+            | Self::Gemini25Pro => false,
+            Self::Custom {
+                supports_adaptive_thinking,
+                ..
+            } => *supports_adaptive_thinking,
         }
     }
 
